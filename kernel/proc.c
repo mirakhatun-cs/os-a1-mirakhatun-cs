@@ -5,6 +5,7 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "uproc.h"
 
 struct cpu cpus[NCPU];
 
@@ -124,6 +125,7 @@ allocproc(void)
 found:
   p->pid = allocpid();
   p->state = USED;
+  p->trace_mask = 0;
 
   // Allocate a trapframe page.
   if ((p->trapframe = (struct trapframe *)kalloc()) == 0) {
@@ -163,6 +165,7 @@ freeproc(struct proc *p)
   p->pagetable = 0;
   p->sz = 0;
   p->pid = 0;
+  p->trace_mask = 0;
   p->name[0] = 0;
   p->chan = 0;
   p->killed = 0;
@@ -274,7 +277,7 @@ kfork(void)
     return -1;
   }
   np->sz = p->sz;
-
+  np->trace_mask = p->trace_mask;
   // copy saved user registers.
   *(np->trapframe) = *(p->trapframe);
 
@@ -700,4 +703,72 @@ procdump(void)
     printk("%d %s %s", p->pid, state, p->name);
     printk("\n");
   }
+}
+
+
+
+uint64
+countprocs(void)
+{
+  struct proc *p;
+  uint64 count = 0;
+
+  for (p = proc; p < &proc[NPROC]; p++) {
+    acquire(&p->lock);
+
+    if (p->state != UNUSED) {
+      count++;
+    }
+
+    release(&p->lock);
+  }
+
+  return count;
+}
+
+
+int
+copyprocs(uint64 addr, int max)
+{
+  struct proc *p;
+  struct proc *current = myproc();
+  struct uproc info;
+  int count = 0;
+
+  if (max < 0)
+    return -1;
+
+  for (p = proc; p < &proc[NPROC] && count < max; p++) {
+
+    // Lock order must be wait_lock, then p->lock.
+    acquire(&wait_lock);
+    acquire(&p->lock);
+
+    if (p->state == UNUSED) {
+      release(&p->lock);
+      release(&wait_lock);
+      continue;
+    }
+
+    // Copy process information into a local structure.
+    info.pid = p->pid;
+    info.ppid = p->parent ? p->parent->pid : 0;
+    info.state = p->state;
+    info.sz = p->sz;
+    memmove(info.name, p->name, sizeof(info.name));
+
+    release(&p->lock);
+    release(&wait_lock);
+
+    // Do not hold process locks while copying to user space.
+    if (copyout(current->pagetable, current->sz,
+                addr + count * sizeof(info),
+                (char *)&info, sizeof(info)) < 0) {
+      return -1;
+    }
+
+    count++;
+  }
+
+  return count;
 }

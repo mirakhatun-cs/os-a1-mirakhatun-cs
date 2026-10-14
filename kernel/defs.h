@@ -28,6 +28,7 @@ int             kexec(char*, char**);
 
 // file.c
 struct file*    filealloc(void);
+uint64          countopenfiles(void);
 void            fileclose(struct file*);
 struct file*    filedup(struct file*);
 void            fileinit(void);
@@ -60,7 +61,7 @@ void            ireclaim(int);
 void*           kalloc(void);
 void            kfree(void *);
 void            kinit(void);
-
+uint64          countfreemem(void);
 // log.c
 void            initlog(int, struct superblock*);
 void            log_write(struct buf*);
@@ -103,6 +104,8 @@ void            yield(void);
 int             either_copyout(int user_dst, uint64 dst, void *src, uint64 len);
 int             either_copyin(void *dst, int user_src, uint64 src, uint64 len);
 void            procdump(void);
+uint64          countprocs(void);
+int             copyprocs(uint64 addr, int max);
 
 // swtch.S
 void            swtch(struct context*, struct context*);

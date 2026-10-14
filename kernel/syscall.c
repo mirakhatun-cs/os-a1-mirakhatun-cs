@@ -1,3 +1,4 @@
+
 #include "types.h"
 #include "param.h"
 #include "memlayout.h"
@@ -13,15 +14,15 @@ fetchaddr(uint64 addr, uint64 *ip)
 {
   struct proc *p = myproc();
   if (addr >= p->sz ||
-      addr + sizeof(uint64) > p->sz) // both tests needed, in case of overflow
+      addr + sizeof(uint64) > p->sz)
     return -1;
-  if (copyin(p->pagetable, p->sz, (char *)ip, addr, sizeof(*ip)) != 0)
+  if (copyin(p->pagetable, p->sz, (char *)ip,
+             addr, sizeof(*ip)) != 0)
     return -1;
   return 0;
 }
 
-// Fetch the nul-terminated string at addr from the current process.
-// Returns length of string, not including nul, or -1 for error.
+// Fetch a null-terminated string from user memory.
 int
 fetchstr(uint64 addr, char *buf, int max)
 {
@@ -35,6 +36,7 @@ static uint64
 argraw(int n)
 {
   struct proc *p = myproc();
+
   switch (n) {
   case 0:
     return p->trapframe->a0;
@@ -49,29 +51,26 @@ argraw(int n)
   case 5:
     return p->trapframe->a5;
   }
+
   panic("argraw");
   return -1;
 }
 
-// Fetch the nth 32-bit system call argument.
+// Fetch the nth 32-bit syscall argument.
 void
 argint(int n, int *ip)
 {
   *ip = argraw(n);
 }
 
-// Retrieve an argument as a pointer.
-// Doesn't check for legality, since
-// copyin/copyout will do that.
+// Retrieve a pointer argument.
 void
 argaddr(int n, uint64 *ip)
 {
   *ip = argraw(n);
 }
 
-// Fetch the nth word-sized system call argument as a null-terminated string.
-// Copies into buf, at most max.
-// Returns string length if OK (not including nul), -1 if error.
+// Fetch a syscall string argument.
 int
 argstr(int n, char *buf, int max)
 {
@@ -80,7 +79,7 @@ argstr(int n, char *buf, int max)
   return fetchstr(addr, buf, max);
 }
 
-// Prototypes for the functions that handle system calls.
+// System call handler declarations.
 extern uint64 sys_fork(void);
 extern uint64 sys_exit(void);
 extern uint64 sys_wait(void);
@@ -103,9 +102,10 @@ extern uint64 sys_link(void);
 extern uint64 sys_mkdir(void);
 extern uint64 sys_close(void);
 extern uint64 sys_sync(void);
-
-// An array mapping syscall numbers from syscall.h
-// to the function that handles the system call.
+extern uint64 sys_trace(void);
+extern uint64 sys_sysinfo(void);
+extern uint64 sys_getprocs(void);
+// Map syscall numbers to handlers.
 static uint64 (*syscalls[])(void) = {
   // clang-format off
   [SYS_fork]    = sys_fork,
@@ -130,9 +130,67 @@ static uint64 (*syscalls[])(void) = {
   [SYS_mkdir]   = sys_mkdir,
   [SYS_close]   = sys_close,
   [SYS_sync]    = sys_sync,
+  [SYS_trace]   = sys_trace,
+  [SYS_sysinfo] = sys_sysinfo,
+  [SYS_getprocs] = sys_getprocs,
   // clang-format on
 };
 
+// System call names for tracing.
+static const char *syscall_names[] = {
+  // clang-format off
+  [SYS_fork]    = "fork",
+  [SYS_exit]    = "exit",
+  [SYS_wait]    = "wait",
+  [SYS_pipe]    = "pipe",
+  [SYS_read]    = "read",
+  [SYS_kill]    = "kill",
+  [SYS_exec]    = "exec",
+  [SYS_fstat]   = "fstat",
+  [SYS_chdir]   = "chdir",
+  [SYS_dup]     = "dup",
+  [SYS_getpid]  = "getpid",
+  [SYS_sbrk]    = "sbrk",
+  [SYS_pause]   = "pause",
+  [SYS_uptime]  = "uptime",
+  [SYS_open]    = "open",
+  [SYS_write]   = "write",
+  [SYS_mknod]   = "mknod",
+  [SYS_unlink]  = "unlink",
+  [SYS_link]    = "link",
+  [SYS_mkdir]   = "mkdir",
+  [SYS_close]   = "close",
+  [SYS_sync]    = "sync",
+  [SYS_trace]   = "trace",
+  [SYS_sysinfo] = "sysinfo",
+  [SYS_getprocs] = "getprocs",
+  // clang-format on
+};
+
+// Check whether the syscall's first argument is a string.
+static int
+trace_string_arg(int num)
+{
+  return num == SYS_open ||
+         num == SYS_exec ||
+         num == SYS_chdir ||
+         num == SYS_mkdir ||
+         num == SYS_unlink ||
+         num == SYS_link ||
+         num == SYS_mknod;
+}
+
+// Check whether no argument should be printed.
+static int
+trace_no_arg(int num)
+{
+  return num == SYS_fork ||
+         num == SYS_getpid ||
+         num == SYS_uptime ||
+         num == SYS_sync;
+}
+
+// Dispatch system calls and print enabled traces.
 void
 syscall(void)
 {
@@ -140,12 +198,58 @@ syscall(void)
   struct proc *p = myproc();
 
   num = p->trapframe->a7;
-  if (num > 0 && num < NELEM(syscalls) && syscalls[num]) {
-    // Use num to lookup the system call function for num, call it,
-    // and store its return value in p->trapframe->a0
+
+  if (num > 0 &&
+      num < NELEM(syscalls) &&
+      syscalls[num]) {
+
+    // Save the original first argument.
+    uint64 firstarg = p->trapframe->a0;
+
+    // Capture a string before exec replaces user memory.
+    char strarg[MAXPATH];
+    int valid_string = 0;
+    int is_string = trace_string_arg(num);
+
+    // Only read the string if tracing this call.
+    int tracing_before =
+      num < 32 &&
+      (((uint)p->trace_mask & (1U << num)) != 0);
+
+    if (is_string && tracing_before) {
+      if (fetchstr(firstarg, strarg,
+                   sizeof(strarg)) >= 0)
+        valid_string = 1;
+    }
+
+    // Execute the system call.
     p->trapframe->a0 = syscalls[num]();
+
+    // Check the mask after execution so trace can trace itself.
+    if (num < 32 &&
+        ((uint)p->trace_mask & (1U << num))) {
+
+      int ret = (int)p->trapframe->a0;
+
+      printk("[%d] %s(", p->pid, syscall_names[num]);
+
+      if (trace_no_arg(num)) {
+        // Print no arguments.
+      } else if (is_string) {
+        if (valid_string)
+          printk("\"%s\"", strarg);
+        else
+          printk("?");
+      } else {
+        printk("%d", (int)firstarg);
+      }
+
+      printk(") -> %d\n", ret);
+    }
+
   } else {
-    printk("%d %s: unknown sys call %d\n", p->pid, p->name, num);
+    printk("%d %s: unknown sys call %d\n",
+           p->pid, p->name, num);
     p->trapframe->a0 = -1;
   }
 }
