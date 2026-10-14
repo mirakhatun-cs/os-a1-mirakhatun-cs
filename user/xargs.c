@@ -3,10 +3,10 @@
 #include "kernel/param.h"
 #include "user/user.h"
 
-#define MAXWORDS 512
 #define INPUTSIZE 4096
+
 static char input[INPUTSIZE];
-static char *words[MAXWORDS];
+static char *cmd[MAXARG + 1];
 
 void
 usage(void)
@@ -15,7 +15,6 @@ usage(void)
   exit(1);
 }
 
-// Run one command and wait until it finishes.
 int
 run(char *argv[])
 {
@@ -41,36 +40,46 @@ int
 main(int argc, char *argv[])
 {
   int start = 1;
-  int limit = MAXARG;
   int use_n = 0;
+  int limit = 0;
   int base = 0;
   int failed = 0;
+  int pos = 0;
+  int nwords = 0;
+  int inword = 0;
+  char c;
+  int n;
 
   if (argc >= 2 && strcmp(argv[1], "-n") == 0) {
-    if (argc < 4)
+    if (argc < 4 || argv[2][0] == '\0')
       usage();
 
-    // Validate N: only positive decimal integers.
+    int value = 0;
+
     for (int i = 0; argv[2][i]; i++) {
-      if (argv[2][i] < '0' || argv[2][i] > '9')
+      char ch = argv[2][i];
+
+      if (ch < '0' || ch > '9')
         usage();
+
+      int digit = ch - '0';
+
+      if (value > (MAXARG - digit) / 10)
+        usage();
+
+      value = value * 10 + digit;
     }
 
-    if (argv[2][0] == '\0')
-      usage();
-
-    limit = atoi(argv[2]);
-    if (limit < 1)
+    if (value < 1)
       usage();
 
     use_n = 1;
+    limit = value;
     start = 3;
   }
 
   if (start >= argc)
     usage();
-
-  char *cmd[MAXARG + 1];
 
   for (int i = start; i < argc; i++) {
     if (base >= MAXARG)
@@ -83,77 +92,78 @@ main(int argc, char *argv[])
   if (capacity < 1)
     usage();
 
+  if (!use_n)
+    limit = capacity;
+
   if (limit > capacity)
     limit = capacity;
 
-  
-  int nwords = 0;
-  int pos = 0;
-  int inword = 0;
-
-  // Read all stdin, preserving line boundaries.
-  char c;
-  int n;
+  cmd[base] = 0;
 
   while ((n = read(0, &c, 1)) == 1) {
-    if (pos >= INPUTSIZE - 1) {
-      fprintf(2, "xargs: input too long\n");
-      exit(1);
-    }
 
-    if (c == ' ' || c == '\t' || c == '\n') {
+    int separator = (c == ' ' || c == '\t' ||
+                     c == '\n');
+
+    if (separator) {
+
       if (inword) {
         input[pos++] = '\0';
         inword = 0;
       }
 
-      if (c == '\n' && !use_n) {
-        if (nwords > 0) {
-          int offset = 0;
+      if (use_n && nwords == limit) {
+        cmd[base + nwords] = 0;
 
-          while (offset < nwords) {
-            int count = nwords - offset;
-            if (count > capacity)
-              count = capacity;
+        if (run(cmd))
+          failed = 1;
 
-            for (int j = 0; j < count; j++)
-              cmd[base + j] = words[offset + j];
-
-            cmd[base + count] = 0;
-            if (run(cmd))
-              failed = 1;
-
-            offset += count;
-          }
-        }
         nwords = 0;
+        pos = 0;
       }
-    } else {
-      if (!inword) {
-        if (nwords >= MAXWORDS) {
-          fprintf(2, "xargs: too many words\n");
-          exit(1);
+
+      if (!use_n && c == '\n') {
+        if (nwords > 0) {
+          cmd[base + nwords] = 0;
+
+          if (run(cmd))
+            failed = 1;
         }
-        words[nwords++] = &input[pos];
+
+        nwords = 0;
+        pos = 0;
+      }
+
+    } else {
+
+      if (!inword) {
+        if (nwords >= limit) {
+          if (!use_n) {
+            fprintf(2, "xargs: too many arguments\n");
+            exit(1);
+          }
+
+          cmd[base + nwords] = 0;
+
+          if (run(cmd))
+            failed = 1;
+
+          nwords = 0;
+          pos = 0;
+        }
+
+        cmd[base + nwords] = &input[pos];
+        nwords++;
         inword = 1;
       }
+
+      if (pos >= INPUTSIZE - 1) {
+        fprintf(2, "xargs: input too long\n");
+        exit(1);
+      }
+
       input[pos++] = c;
     }
-
-    if (use_n && !inword && nwords >= limit) {
-      for (int j = 0; j < nwords; j++)
-        cmd[base + j] = words[j];
-
-      cmd[base + nwords] = 0;
-      if (run(cmd))
-        failed = 1;
-
-      nwords = 0;
-      pos = 0;
-    }
-
-    if (!use_n && c == '\n')
-      pos = 0;
   }
 
   if (n < 0) {
@@ -165,22 +175,10 @@ main(int argc, char *argv[])
     input[pos++] = '\0';
 
   if (nwords > 0) {
-    int offset = 0;
+    cmd[base + nwords] = 0;
 
-    while (offset < nwords) {
-      int count = nwords - offset;
-      if (count > (use_n ? limit : capacity))
-        count = use_n ? limit : capacity;
-
-      for (int j = 0; j < count; j++)
-        cmd[base + j] = words[offset + j];
-
-      cmd[base + count] = 0;
-      if (run(cmd))
-        failed = 1;
-
-      offset += count;
-    }
+    if (run(cmd))
+      failed = 1;
   }
 
   exit(failed ? 1 : 0);
